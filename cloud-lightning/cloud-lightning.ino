@@ -29,6 +29,15 @@
  */
 
 #include <Adafruit_NeoPixel.h>
+#include <BlynkSimpleEsp8266.h>
+
+#if DEBUG
+#define BLYNK_PRINT Serial
+#endif
+
+const char WIFI_SSID[] = "Willow's Den";
+const char WIFI_PSK[] = "1234567890";
+const char BLYNK_AUTH[] = "1d24281960104be9832021e96eace915";
 
 // Parameter 1 = number of pixels in strip
 // Parameter 2 = pin number (most are valid)
@@ -37,8 +46,17 @@
 //   NEO_GRB     Pixels are wired for GRB bitstream
 //   NEO_KHZ400  400 KHz bitstream (e.g. FLORA pixels)
 //   NEO_KHZ800  800 KHz bitstream (e.g. High Density LED strip)
-int NUM_LEDS = 4;
-int LED_PIN = 4;
+
+int NUM_LEDS = 150;
+int RAINBOW_LED_COUNT = 50;
+
+int LED_PIN = 0;
+int BOARD_LED_PIN = 5;
+
+#define ON_OFF_BTN_PIN    V0
+#define ZERGBA_PIN        V1
+#define RAINBOW_BTN_PIN   V2
+
 Adafruit_NeoPixel strip = Adafruit_NeoPixel(NUM_LEDS, LED_PIN, NEO_GRB + NEO_KHZ800);
 
 const int HIGH_STRIKE_LIKELIHOOD = 5;
@@ -75,10 +93,26 @@ float random_moving_average_previous = 0;
 float (*functionPtrs[10])(); //the array of function pointers
 int NUM_FUNCTIONS = 2;
 
+bool lightning = false;
+bool rainbow_mode = false;
+int rainbow_start_byte = 0;
+int moodLighting = 0x000000;
+
 void setup() {
-  // Setup the Serial connection to talk over Bluetooth
+
   Serial.begin(9600);
+  pinMode(BOARD_LED_PIN, OUTPUT);
   
+  uint8_t led = 0;
+  Blynk.begin(BLYNK_AUTH, WIFI_SSID, WIFI_PSK);
+  while ( Blynk.connect() == false ) {
+    led ^= 0x01;
+    digitalWrite(BOARD_LED_PIN, led);
+    delay(200);
+    Serial.print(".");
+  }
+  digitalWrite(BOARD_LED_PIN, HIGH);
+  Serial.println("connected");
   // Neopixel setup
   strip.begin();
   strip.show(); // Initialize all pixels to 'off'
@@ -89,22 +123,42 @@ void setup() {
 }
 
 void loop() {
-  String trigger = readFromBluetooth();
-  if (trigger==String("f")) {
-    int led = random(NUM_LEDS);
-    for (int i = 0; i < 10; i++) {
-      // Use this line to keep the lightning focused in one LED.
-      // lightningStrike(led):
-      // Use this line if you want the lightning to spread out among multiple LEDs.
-      lightningStrike(random(NUM_LEDS));
-    }
-    // Once there's been one strike, I make it more likely that there will be a second.
-    chance = HIGH_STRIKE_LIKELIHOOD;
+
+  Blynk.run();
+
+  if (lightning && !rainbow_mode) {
+
+    if (random(chance) == 3) {
+      int led = random(NUM_LEDS);
+      for (int i = 0; i < 10; i++) {
+          // Use this line to keep the lightning focused in one LED.
+          // lightningStrike(led):
+          // Use this line if you want the lightning to spread out among multiple LEDs.
+          lightningStrike(random(10, NUM_LEDS));
+        }
+        // Once there's been one strike, I make it more likely that there will be a second.
+        chance = HIGH_STRIKE_LIKELIHOOD;
+      } else {
+        chance = LOW_STRIKE_LIKELIHOOD;
+      }
+      delay(500);
+  } 
+  if (rainbow_mode) {
+    rainbow(rainbow_start_byte++);
+    rainbow_start_byte = rainbow_start_byte > 10*NUM_LEDS ? 0 : rainbow_start_byte;
+    delay(100);
   } else {
-    chance = LOW_STRIKE_LIKELIHOOD;
+    setAllPixelsTo(150, moodLighting);
   }
-  turnAllPixelsOff();
-  delay(1000);
+
+  strip.show();
+}
+
+void setAllPixelsTo(int num_leds, int color) {
+  for (int i = 0; i < num_leds; i++) {
+    strip.setPixelColor(i, color);
+  }
+  strip.show();
 }
 
 void turnAllPixelsOff() {
@@ -121,26 +175,9 @@ void lightningStrike(int pixel) {
   strip.setPixelColor(pixel, strip.Color(scaledWhite, scaledWhite, scaledWhite));
   strip.show();
   delay(random(5, 100));
+//  delay(random(30, 100));
   currentDataPoint++;
   currentDataPoint = currentDataPoint%NUM_Y_VALUES;
-}
-
-/**
- * Read the data from the BLE, breaking on '\n' and '\r' characters.
- */
-String readFromBluetooth() {
-  String readString = "";
-
-    while (Serial.available()) {
-    delay(10);  //small delay to allow input buffer to fill
-
-    char c = Serial.read(); //gets one byte from serial buffer
-    if (c == '\n' || c == '\r') {
-      break;
-    }
-    readString += c;
-  }
-  return readString;
 }
 
 float callFunction(int index) {
@@ -170,4 +207,91 @@ float random_moving_average() {
   random_moving_average_previous = random_moving_average_current;
 
   return random_moving_average_current;
+}
+
+BLYNK_WRITE(ON_OFF_BTN_PIN) {
+  Serial.println("received blynk");
+  if ( param.asInt() == 1) {
+      lightning = true;
+  } else {
+      lightning = false;
+  }
+  strip.show();  
+}
+
+BLYNK_WRITE(RAINBOW_BTN_PIN) {
+  Serial.println("received blynk");
+  if ( param.asInt() == 1) {
+      rainbow_mode = true;
+  } else {
+      rainbow_mode = false;
+  }
+}
+
+BLYNK_WRITE(ZERGBA_PIN) {
+  unsigned char color_r = param[0].asInt() / 1024.0 * 255 / 10;
+  unsigned char color_g = param[1].asInt() / 1024.0 * 255 / 10;
+  unsigned char color_b = param[2].asInt() / 1024.0 * 255 / 10;
+
+  Serial.print(color_r); 
+  Serial.print(color_g); 
+  Serial.print(color_b); 
+
+  moodLighting = (color_b & 0xFF) | ((color_g & 0xFF) << 8) | ((color_r & 0x0F) << 16);
+  setAllPixelsTo(NUM_LEDS, moodLighting);
+  Serial.println("");
+}
+
+void rainbow(byte startPosition) 
+{  
+  // Need to scale our rainbow. We want a variety of colors, even if there
+  // are just 10 or so pixels.
+  int rainbowScale = 192 / RAINBOW_LED_COUNT;
+  
+  // Next we setup each pixel with the right color
+  for (int i=0; i < RAINBOW_LED_COUNT; i++)
+  {
+    // There are 192 total colors we can get out of the rainbowOrder function.
+    // It'll return a color between red->orange->green->...->violet for 0-191.
+    strip.setPixelColor(i, rainbowOrder((rainbowScale * (i + startPosition)) % 192));
+  }
+  // Finally, actually turn the LEDs on:
+  strip.show();
+}
+
+// Input a value 0 to 191 to get a color value.
+// The colors are a transition red->yellow->green->aqua->blue->fuchsia->red...
+//  Adapted from Wheel function in the Adafruit_NeoPixel library example sketch
+uint32_t rainbowOrder(byte position) 
+{
+  // 6 total zones of color change:
+  if (position < 31)  // Red -> Yellow (Red = FF, blue = 0, green goes 00-FF)
+  {
+    return strip.Color(0xFF, position * 8, 0);
+  }
+  else if (position < 63)  // Yellow -> Green (Green = FF, blue = 0, red goes FF->00)
+  {
+    position -= 31;
+    return strip.Color(0xFF - position * 8, 0xFF, 0);
+  }
+  else if (position < 95)  // Green->Aqua (Green = FF, red = 0, blue goes 00->FF)
+  {
+    position -= 63;
+    return strip.Color(0, 0xFF, position * 8);
+  }
+  else if (position < 127)  // Aqua->Blue (Blue = FF, red = 0, green goes FF->00)
+  {
+    position -= 95;
+    return strip.Color(0, 0xFF - position * 8, 0xFF);
+  }
+  else if (position < 159)  // Blue->Fuchsia (Blue = FF, green = 0, red goes 00->FF)
+  {
+    position -= 127;
+    return strip.Color(position * 8, 0, 0xFF);
+  }
+  else  //160 <position< 191   Fuchsia->Red (Red = FF, green = 0, blue goes FF->00)
+  {
+    position -= 159;
+    return strip.Color(0xFF, 0x00, 0xFF - position * 8);
+  }
 }
